@@ -65,6 +65,7 @@ class Stream(object):
         all_reflections = []
         REFLECTIONS = 0
         GEOM = 0
+        ADD = 0
 
         for index, line in enumerate(stream):
 
@@ -72,26 +73,26 @@ class Stream(object):
             while (head_check == 0):
 
                 header += line
-                if '----- Begin geometry file -----' in line: GEOM = 1
-
-                if GEOM:
-                    if 'clen' in line:
-                        geom.distance = float(line.split('=')[1].split(';')[0].strip())
-                    if 'corner_x' in line:
-                        geom.bx = -1 * float(line.split('=')[1].split(';')[0].strip())
-                    if 'corner_y' in line:
-                        geom.by = -1 * float(line.split('=')[1].split(';')[0].strip())
-                    if 'res' in line:
-                        geom.ps = 1 / float(line.split('=')[1].split(';')[0].strip())
-                    if 'photon_energy' in line:
-                        geom.energy = float(line.split('=')[1].split(';')[0].strip())
-                        geom.wl = 12398.425 / geom.energy
-                    if 'max_fs' in line:
-                        geom.max_fs = float(line.split('=')[1].split(';')[0].strip())
-                    if 'max_ss' in line:
-                        geom.max_ss = float(line.split('=')[1].split(';')[0].strip())
-
-                break
+                # if '----- Begin geometry file -----' in line: GEOM = 1
+                #
+                # if GEOM:
+                #     if 'clen' in line:
+                #         geom.distance = float(line.split('=')[1].split(';')[0].strip())
+                #     if 'corner_x' in line:
+                #         geom.bx = -1 * float(line.split('=')[1].split(';')[0].strip())
+                #     if 'corner_y' in line:
+                #         geom.by = -1 * float(line.split('=')[1].split(';')[0].strip())
+                #     if 'res' in line:
+                #         geom.ps = 1 / float(line.split('=')[1].split(';')[0].strip())
+                #     if 'photon_energy' in line:
+                #         geom.energy = float(line.split('=')[1].split(';')[0].strip())
+                #         geom.wl = 12398.425 / geom.energy
+                #     if 'max_fs' in line:
+                #         geom.max_fs = float(line.split('=')[1].split(';')[0].strip())
+                #     if 'max_ss' in line:
+                #         geom.max_ss = float(line.split('=')[1].split(';')[0].strip())
+                #
+                # break
 
             if 'Begin chunk' in line:
                 count_shots += 1
@@ -102,9 +103,13 @@ class Stream(object):
                 count_crystals += 1
                 frame = Frame()
             elif "Cell parameters" in line:
+                ADD = 0
                 ls = line.split()
                 a, b, c = map(float, ls[2:5])
+
                 al, be, ga = map(float, ls[6:9])
+                if be >= 90.:
+                    ADD = 1
                 self.cells.append([a, b, c, al, be, ga])
 
             elif "----- End unit cell -----" in line:
@@ -114,7 +119,7 @@ class Stream(object):
                 REFLECTIONS = 0
 
             elif "End chunk" in line:
-                if crystal == 1:
+                if crystal == 1 and ADD == 1:
                     frame.all = frame_stream
                     frames.append(frame)
                 append = 0
@@ -143,105 +148,118 @@ class Stream(object):
 
         return header, frames, geom, all_reflections
 
-    def bkg_stats(self,maxres, bins, sig, outputfn):
-        
-        self.bins = 1./ (1. /maxres * np.arange(0.0001, 1.05, 1. / bins) ** (1. / 3.))[::-1]
-
-        hkl = self.all_reflections[:,0:3]
-        cell = np.mean(np.array(self.cells), axis=0)
-        RES = resolution(cell, hkl)
-        BKG = self.all_reflections[:,5]
-        #RES = self.geom.get_resolution(self.all_reflections[:, 6], self.all_reflections[:, 7])
-
-        # Calculate the mean and std bkg values for each resolution bin
-        TOFIX = []
-        mean = []
-        std = []
-        for i in range(self.bins.size):
-            # Get resolution range limits
-            if i == self.bins.size - 1:
-                rmax = RES.max()
-            else:
-                rmax = self.bins[i + 1]
-            rmin = self.bins[i]
-
-            #Get bkg values for the considered bin
-            idx = np.where( (RES < rmax) & ( RES >= rmin))
-            IR0 = BKG[idx]
-            m = IR0.mean()
-            s = IR0.std()
-            mean.append(m)
-            std.append(s)
-            message=""
-            #Worrisome bins are flagged if the mean bkg level is if std > mean
-            if s > m:
-                message = " -- WORRISOME !! -- "
-                TOFIX.append(True)
-            else:
-                TOFIX.append(False)
-            print("Shell %4.2f - %4.2f : %4.2f +/- %4.2f %s" % (rmax, rmin, m, s, message))
-        print("/n/n")
-
-        #Now flagging the outliers
-
-        #The threshold to reject outliers reflections is computed using thefor worrisome resolutions bins from the closest regular bin and is equal to mean(bkg) + 2 * std(bkg)
-        threshold_idx = np.where(np.array(TOFIX) == True)[0][0]
-        threshold = mean[threshold_idx] + sig * std[threshold_idx]
-
-        IDX = []
-        Nremoved = 0
-        NWorrBins = 0
-        for i in range(len(TOFIX)):
-            if i == self.bins.size - 1:
-                rmax = 50
-            else:
-                rmax = self.bins[i + 1]
-            rmin = self.bins[i]
-
-            # If the bin is OK, just updating the threshold value
-            if not TOFIX[i]:
-                threshold = mean[i] + sig * std[i]
-
-            # If the bin is worrisome
-            if TOFIX[i]:
-
-                #getting the reflections in the bins below the threshold (to compute the new mean and sd after outliers rejection)
-                idx = np.where(((RES <= rmax) & (RES > rmin)) & (BKG <= threshold))
-
-                m = BKG[idx[0]].mean()
-                s = BKG[idx[0]].std()
-                #threshold = mean[i] + sig * std[i]
-                
-                #getting the outliers
-                tmp = list(np.where(((RES <= rmax) & (RES > rmin)) & (BKG >= threshold))[0])
-                Nremoved += len(tmp)
-                NWorrBins += len(tmp) + idx[0].size
-                IDX.extend(tmp)
-                print("Shell %4.2f - %4.2f : %4.2f +/- %4.2f -- %8i outliers removed out of %8i reflections, i.e (%4.2f %%)" % (rmax, rmin, m, s, len(tmp), len(tmp) + idx[0].size, float(len(tmp)) / (len(tmp) + idx[0].size) * 100))
-            else:
-                print("Shell %4.2f - %4.2f : %4.2f +/- %4.2f" % (rmax, rmin, mean[i], std[i]))
-        print("In the worrisome resolution bins, %8i outliers out of %8i reflections will be deleted from the stream (%4.2f%%)"%(Nremoved, NWorrBins, float(Nremoved) / NWorrBins * 100))
-
-        IDX = sorted(list(set(IDX)))
-        self.count = 0
-        self.idx = 0
-
-
+    def write_stream(self, outputfn):
         out = open(outputfn, 'w')
+
         print >> out, self.header,
-        j = 0
         for frame in self.frames:
-            toberemoved = []
-            while j < len(IDX) and IDX[j] < len(frame.hkl_stream) + self.count:
-                    toberemoved.append(IDX[j] - self.count)
-                    j += 1
-            self.count += len(frame.hkl_stream)
-            for i in sorted(toberemoved, reverse=True):
-                    del frame.hkl_stream[i]
-            print >> out, ''.join(frame.all),
-            print >> out, ''.join(frame.hkl_stream),
-            print >> out, "End of reflections\n--- End crystal\n----- End chunk -----"
+                 print >> out, ''.join(frame.all),
+                 print >> out, ''.join(frame.hkl_stream),
+                 print >> out, "End of reflections\n--- End crystal\n----- End chunk -----"
         out.close()
+
+
+# def bkg_stats(self,maxres, bins, sig, outputfn):
+    #
+    #     self.bins = 1./ (1. /maxres * np.arange(0.0001, 1.05, 1. / bins) ** (1. / 3.))[::-1]
+    #
+    #     hkl = self.all_reflections[:,0:3]
+    #     cell = np.mean(np.array(self.cells), axis=0)
+    #     RES = resolution(cell, hkl)
+    #     BKG = self.all_reflections[:,5]
+    #     #RES = self.geom.get_resolution(self.all_reflections[:, 6], self.all_reflections[:, 7])
+    #
+    #     # Calculate the mean and std bkg values for each resolution bin
+    #     TOFIX = []
+    #     mean = []
+    #     std = []
+    #     for i in range(self.bins.size):
+    #         # Get resolution range limits
+    #         if i == self.bins.size - 1:
+    #             rmax = RES.max()
+    #         else:
+    #             rmax = self.bins[i + 1]
+    #         rmin = self.bins[i]
+    #
+    #         #Get bkg values for the considered bin
+    #         idx = np.where( (RES < rmax) & ( RES >= rmin))
+    #         IR0 = BKG[idx]
+    #         m = IR0.mean()
+    #         s = IR0.std()
+    #         mean.append(m)
+    #         std.append(s)
+    #         message=""
+    #         #Worrisome bins are flagged if the mean bkg level is if std > mean
+    #         if s > m:
+    #             message = " -- WORRISOME !! -- "
+    #             TOFIX.append(True)
+    #         else:
+    #             TOFIX.append(False)
+    #         print("Shell %4.2f - %4.2f : %4.2f +/- %4.2f %s" % (rmax, rmin, m, s, message))
+    #     print("/n/n")
+    #
+    #     #Now flagging the outliers
+    #
+    #     #The threshold to reject outliers reflections is computed using thefor worrisome resolutions bins from the closest regular bin and is equal to mean(bkg) + 2 * std(bkg)
+    #     threshold_idx = np.where(np.array(TOFIX) == True)[0][0]
+    #     threshold = mean[threshold_idx] + sig * std[threshold_idx]
+    #
+    #     IDX = []
+    #     Nremoved = 0
+    #     NWorrBins = 0
+    #     for i in range(len(TOFIX)):
+    #         if i == self.bins.size - 1:
+    #             rmax = 50
+    #         else:
+    #             rmax = self.bins[i + 1]
+    #         rmin = self.bins[i]
+    #
+    #         # If the bin is OK, just updating the threshold value
+    #         if not TOFIX[i]:
+    #             threshold = mean[i] + sig * std[i]
+    #
+    #         # If the bin is worrisome
+    #         if TOFIX[i]:
+    #
+    #             #getting the reflections in the bins below the threshold (to compute the new mean and sd after outliers rejection)
+    #             idx = np.where(((RES <= rmax) & (RES > rmin)) & (BKG <= threshold))
+    #
+    #             m = BKG[idx[0]].mean()
+    #             s = BKG[idx[0]].std()
+    #             #threshold = mean[i] + sig * std[i]
+    #
+    #             #getting the outliers
+    #             tmp = list(np.where(((RES <= rmax) & (RES > rmin)) & (BKG >= threshold))[0])
+    #             Nremoved += len(tmp)
+    #             NWorrBins += len(tmp) + idx[0].size
+    #             IDX.extend(tmp)
+    #             print("Shell %4.2f - %4.2f : %4.2f +/- %4.2f -- %8i outliers removed out of %8i reflections, i.e (%4.2f %%)" % (rmax, rmin, m, s, len(tmp), len(tmp) + idx[0].size, float(len(tmp)) / (len(tmp) + idx[0].size) * 100))
+    #         else:
+    #             print("Shell %4.2f - %4.2f : %4.2f +/- %4.2f" % (rmax, rmin, mean[i], std[i]))
+    #     print("In the worrisome resolution bins, %8i outliers out of %8i reflections will be deleted from the stream (%4.2f%%)"%(Nremoved, NWorrBins, float(Nremoved) / NWorrBins * 100))
+    #
+    #     IDX = sorted(list(set(IDX)))
+    #     self.count = 0
+    #     self.idx = 0
+    #
+    #
+    #     out = open(outputfn, 'w')
+    #     print >> out, self.header,
+    #     j = 0
+    #     for frame in self.frames:
+    #         toberemoved = []
+    #         while j < len(IDX) and IDX[j] < len(frame.hkl_stream) + self.count:
+    #                 toberemoved.append(IDX[j] - self.count)
+    #                 j += 1
+    #         self.count += len(frame.hkl_stream)
+    #         for i in sorted(toberemoved, reverse=True):
+    #                 del frame.hkl_stream[i]
+    #         print >> out, ''.join(frame.all),
+    #         print >> out, ''.join(frame.hkl_stream),
+    #         print >> out, "End of reflections\n--- End crystal\n----- End chunk -----"
+    #     out.close()
+
+
 
 class Frame(object):
     def __init__(self):
@@ -322,26 +340,13 @@ class ArgumentParser(argparse.ArgumentParser):
         argparse.ArgumentParser.__init__(self, description=desc)
         self.add_argument("-i","--input", nargs=1, type=str, default= None,
                        help="Input stream")
-        self.add_argument("-r", "--resolution","--res", nargs=1, type=float, default= None,
-                          help="High resolution limit (default: High resolution at detector edge)")
-        self.add_argument("-n", "--bins", nargs=1, default= [50], type=int,
-                       help="Number of bins to be used (default: 50)")
-
-        self.add_argument("-s","--sigma", nargs= 1, type=int, default= [2],
-                       help="Sigma outlier rejection (default:2)")
-
-        self.add_argument("-o","--output", nargs= 1, type=str, default= None,
-                       help="Optional - Output stream")
+        self.add_argument("-o", "--output", nargs=1, type=str, default=None,
+                          help="Output stream")
 
         self.args = self.parse_args()
         self.checkInput()
         
     def checkInput(self):
-        
-        if self.args.resolution == None:
-            return False
-        else:
-            self.res = self.args.resolution[0]
         
         if self.args.input == None:
             return False
@@ -357,8 +362,8 @@ class ArgumentParser(argparse.ArgumentParser):
             else:
                 self.output = self.args.output[0]
             
-        self.nbins = self.args.bins[0]
-        self.sig = self.args.sigma[0]
+        #self.nbins = self.args.bins[0]
+        #self.sig = self.args.sigma[0]
         
         return True
         
@@ -371,12 +376,12 @@ if __name__ == '__main__':
     if parser.checkInput():
         print("Input CrystFEL stream   : %s" % parser.stream)
         print("Output CrystFEL stream  : %s" % parser.output)
-        print("N resolutions bins      : %i" % parser.nbins)
-        print("High resolution cutoff  : %4.2f" % parser.res)
-        print("Sigma outlier rejection : %i" % parser.sig)
+        #print("N resolutions bins      : %i" % parser.nbins)
+        #print("High resolution cutoff  : %4.2f" % parser.res)
+        #print("Sigma outlier rejection : %i" % parser.sig)
 
         s = Stream(parser.stream)
-        s.bkg_stats(parser.res, parser.nbins, parser.sig, parser.output)
+        s.write_stream(parser.output)
 
     else:
         parser.print_help()
